@@ -1,0 +1,79 @@
+Description: add plymouth.force-frame-buffer kernel command-line parameters
+ Some drm devices need to be load kernel modules before they can be used. 
+ Thus, those device may not normally show splash. 
+ Plymouth can also use fb or efifb, but not default. 
+ This kernel command-line parameters force the use of frame buffer.
+Author: licheng <licheng@uniontech.com>
+
+Origin: https://gerrit.uniontech.com/plugins/gitiles/base/plymouth/+/bed21c53de09c1785ef42c684e4e5fcbf36d795e
+Bug: https://pms.uniontech.com/zentao/bug-view-88958.html
+Last-Update: 2022-05-18
+
+--- plymouth-0.9.5.orig/src/libply-splash-core/ply-device-manager.c
++++ plymouth-0.9.5/src/libply-splash-core/ply-device-manager.c
+@@ -265,6 +265,12 @@ create_devices_for_udev_device (ply_devi
+         const char *device_path;
+         bool created = false;
+ 
++	bool use_fb = false;
++
++	if (manager->flags & PLY_DEVICE_MANAGER_FLAGS_FORCE_FRAME_BUFFER) {
++		use_fb = true;
++	}
++
+         device_path = udev_device_get_devnode (device);
+ 
+         if (device_path != NULL) {
+@@ -273,8 +279,11 @@ create_devices_for_udev_device (ply_devi
+ 
+                 subsystem = udev_device_get_subsystem (device);
+                 ply_trace ("device subsystem is %s", subsystem);
+-
+-                if (subsystem != NULL && strcmp (subsystem, SUBSYSTEM_DRM) == 0) {
++                if (use_fb) {
++			ply_trace ("ignoring, use frame buffer only.");
++			renderer_type = PLY_RENDERER_TYPE_FRAME_BUFFER;
++		}
++                else if (subsystem != NULL && strcmp (subsystem, SUBSYSTEM_DRM) == 0) {
+                         ply_trace ("found DRM device %s", device_path);
+                         renderer_type = PLY_RENDERER_TYPE_DRM;
+                 } else if (strcmp (subsystem, SUBSYSTEM_FRAME_BUFFER) == 0) {
+@@ -442,7 +451,11 @@ on_udev_event (ply_device_manager_t *man
+                                 ply_trace ("ignoring since we're already using text splash for local console");
+                         else
+                                 on_drm_udev_add_or_change (manager, action, device);
+-                } else {
++		}
++                else if (manager->flags & PLY_DEVICE_MANAGER_FLAGS_FORCE_FRAME_BUFFER) {
++                              on_drm_udev_add_or_change (manager, action, device);
++		}
++                else {
+                         ply_trace ("ignoring since we only handle subsystem %s devices after timeout", subsystem);
+                 }
+         } else if (strcmp (action, "remove") == 0) {
+--- plymouth-0.9.5.orig/src/libply-splash-core/ply-device-manager.h
++++ plymouth-0.9.5/src/libply-splash-core/ply-device-manager.h
+@@ -32,7 +32,8 @@ typedef enum
+         PLY_DEVICE_MANAGER_FLAGS_NONE = 0,
+         PLY_DEVICE_MANAGER_FLAGS_IGNORE_SERIAL_CONSOLES = 1 << 0,
+         PLY_DEVICE_MANAGER_FLAGS_IGNORE_UDEV = 1 << 1,
+-        PLY_DEVICE_MANAGER_FLAGS_SKIP_RENDERERS = 1 << 2
++        PLY_DEVICE_MANAGER_FLAGS_SKIP_RENDERERS = 1 << 2,
++        PLY_DEVICE_MANAGER_FLAGS_FORCE_FRAME_BUFFER = 2 << 3
+ } ply_device_manager_flags_t;
+ 
+ typedef struct _ply_device_manager ply_device_manager_t;
+--- plymouth-0.9.5.orig/src/main.c
++++ plymouth-0.9.5/src/main.c
+@@ -2273,6 +2273,11 @@ main (int    argc,
+                 state.splash_delay = NAN;
+         }
+ 
++        if (ply_kernel_command_line_has_argument ("plymouth.force-frame-buffer")) {
++            if (state.mode != PLY_BOOT_SPLASH_MODE_SHUTDOWN &&
++                    state.mode != PLY_BOOT_SPLASH_MODE_REBOOT)
++            device_manager_flags |= PLY_DEVICE_MANAGER_FLAGS_FORCE_FRAME_BUFFER;
++        }
+         find_force_scale (&state);
+ 
+         load_devices (&state, device_manager_flags);

@@ -1,0 +1,56 @@
+Description: Repair logic for create_devices_for_udev_device
+ If plymouth.force-frame-buffer is set, create_device_for_udev_device
+ will not init drm subsystem. This may save time.
+ Set "/dev/fb0" as default frame buffer devices.
+Author: licheng <licheng@uniontech.com>
+
+Origin: https://gerrit.uniontech.com/plugins/gitiles/base/plymouth/+/892d5cdd3ae7d0cd0d1af5138010e4de4164d077
+Bug: https://pms.uniontech.com/zentao/bug-view-95011.html
+Last-Update: 2022-05-18
+
+--- plymouth-0.9.5.orig/src/libply-splash-core/ply-device-manager.c
++++ plymouth-0.9.5/src/libply-splash-core/ply-device-manager.c
+@@ -265,10 +265,10 @@ create_devices_for_udev_device (ply_devi
+         const char *device_path;
+         bool created = false;
+ 
+-	bool use_fb = false;
++	bool fb_only = false;
+ 
+ 	if (manager->flags & PLY_DEVICE_MANAGER_FLAGS_FORCE_FRAME_BUFFER) {
+-		use_fb = true;
++		fb_only = true;
+ 	}
+ 
+         device_path = udev_device_get_devnode (device);
+@@ -279,13 +279,12 @@ create_devices_for_udev_device (ply_devi
+ 
+                 subsystem = udev_device_get_subsystem (device);
+                 ply_trace ("device subsystem is %s", subsystem);
+-                if (use_fb) {
+-			ply_trace ("ignoring, use frame buffer only.");
+-			renderer_type = PLY_RENDERER_TYPE_FRAME_BUFFER;
+-		}
+-                else if (subsystem != NULL && strcmp (subsystem, SUBSYSTEM_DRM) == 0) {
++                if (subsystem != NULL && strcmp (subsystem, SUBSYSTEM_DRM) == 0) {
+                         ply_trace ("found DRM device %s", device_path);
+                         renderer_type = PLY_RENDERER_TYPE_DRM;
++			if (fb_only) {
++				renderer_type = PLY_RENDERER_TYPE_NONE;
++			}
+                 } else if (strcmp (subsystem, SUBSYSTEM_FRAME_BUFFER) == 0) {
+                         ply_trace ("found frame buffer device %s", device_path);
+                         if (!fb_device_has_drm_device (manager, device))
+--- plymouth-0.9.5.orig/src/plugins/renderers/frame-buffer/plugin.c
++++ plymouth-0.9.5/src/plugins/renderers/frame-buffer/plugin.c
+@@ -254,6 +254,10 @@ create_backend (const char     *device_n
+                 backend->device_name =
+                         strdup (PLY_FRAME_BUFFER_DEFAULT_FB_DEVICE_NAME);
+ 
++#ifdef PLY_FRAME_BUFFER_DEFAULT_FB_DEVICE_NAME
++	backend->device_name = strdup (PLY_FRAME_BUFFER_DEFAULT_FB_DEVICE_NAME);
++#endif
++
+         ply_trace ("creating renderer backend for device %s", backend->device_name);
+ 
+         backend->loop = ply_event_loop_get_default ();

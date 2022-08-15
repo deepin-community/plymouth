@@ -1,0 +1,8 @@
+0003-default-theme.patch
+0005-cmdline.patch
+0008-show-delay.patch
+drop-systemd-vconsole-setup-service.patch
+fallback-etc-default-keyboard.patch
+deepin-Add-kernel-command-line-parameters-force-the-use-of-frame-buffer.patch
+deepin-Add-support-for-bgr32-frame-buffer-device.patch
+deepin-Repair-logic-for-create-devices-for-udev-device.patch
