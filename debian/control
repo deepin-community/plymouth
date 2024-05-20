@@ -3,7 +3,7 @@ Section: misc
 Priority: optional
 Maintainer: Deepin Developer <deepin-dev@deepin.org>
 Uploaders: Deepin Packages Builder <packages@deepin.org>
-Build-Depends: debhelper-compat (= 12),
+Build-Depends: debhelper-compat (= 13),
                docbook-xsl,
                libdrm-dev,
                libgtk-3-dev (>= 3.14.0),

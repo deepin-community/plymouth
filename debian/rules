@@ -8,6 +8,8 @@ export DEB_LDFLAGS_MAINT_APPEND=-Wl,-z,defs -Wl,-O1 -Wl,--as-needed
 export DEB_CFLAGS_MAINT_APPEND = -pie -fPIC
 export DEB_CPPFLAGS_MAINT_APPEND = -pie -fPIC
 
+export systemdsystemunitdir=$(shell pkg-config --variable=systemdsystemunitdir systemd | sed s,^/,,)
+
 %:
 	dh ${@}
 

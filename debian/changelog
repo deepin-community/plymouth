@@ -1,3 +1,10 @@
+plymouth (0.9.5.1-deepin2) unstable; urgency=medium
+
+  * fix: systemd files move to /usr, from patch
+    https://salsa.debian.org/debian/plymouth/-/commit/b86e0f164a94e3f538c27555a577571abecf4818 and https://salsa.debian.org/debian/plymouth/-/commit/ba1c095e8c1e2d7ba628673c2318233db4c965d2
+
+ -- hudeng <hudeng@deepin.org>  Mon, 20 May 2024 14:58:57 +0800
+
 plymouth (0.9.5.1-deepin) stable; urgency=medium
 
   * ['Rebuild  against by  current gcc 11.2']
