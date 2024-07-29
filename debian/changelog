@@ -1,3 +1,15 @@
+plymouth (0.9.5.1-deepin3) unstable; urgency=medium
+
+  * Do not show Debian watermark.
+  * Debian's Plymouth hook installs a Debian watermark on the right side of
+    the display if:
+    * The user has installed desktop-base (a very common practice for Debian
+      desktop systems, but not for deepin/UOS, as we do not use tasksel).
+    * The user has chosen a two-step-type Plymouth theme (which deepin-logo is
+      one of that type).
+
+ -- Mingcong Bai <baimingcong@uniontech.com>  Mon, 29 Jul 2024 14:44:07 +0800
+
 plymouth (0.9.5.1-deepin2) unstable; urgency=medium
 
   * fix: systemd files move to /usr, from patch
