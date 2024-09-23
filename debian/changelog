@@ -1,3 +1,17 @@
+plymouth (24.004.60-2deepin1) unstable; urgency=medium
+
+  * Backport two upstream patches to fix splash hang on framebuffer and non-
+    modeset devices (i.e., NVIDIA Optimus laptops).
+  * Do not show Debian watermark.
+  * Debian's Plymouth hook installs a Debian watermark on the right side of
+    the display if:
+    * The user has installed desktop-base (a very common practice for Debian
+      desktop systems, but not for deepin/UOS, as we do not use tasksel).
+    * The user has chosen a two-step-type Plymouth theme (which deepin-logo is
+      one of that type).
+
+ -- Mingcong Bai <baimingcong@uniontech.com>  Mon, 29 Jul 2024 14:44:07 +0800
+
 plymouth (24.004.60-2) unstable; urgency=medium
 
   * Team upload

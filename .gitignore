@@ -22,7 +22,6 @@ autom4te.cache
 Makefile
 aclocal.m4
 *.tar.bz2
-*.patch
 stamp-*
 *.rpm
 plymouth
