@@ -23,6 +23,7 @@
 #include <errno.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 #include <sys/types.h>
 #include <time.h>
@@ -81,6 +82,7 @@ ply_logger_t *ply_logger_get_error_default (void);
 #ifdef PLY_ENABLE_TRACING
 void ply_logger_toggle_tracing (ply_logger_t *logger);
 bool ply_logger_is_tracing_enabled (ply_logger_t *logger);
+bool ply_logger_is_tracing_to_terminal (ply_logger_t *logger);
 
 #define ply_logger_trace(logger, format, args ...)                              \
         do                                                                             \
@@ -95,10 +97,10 @@ bool ply_logger_is_tracing_enabled (ply_logger_t *logger);
                         ply_logger_flush (logger);                                             \
                         snprintf (buf, sizeof(buf),                                            \
                                   "%02d:%02d:%02d.%03d %s:%d:%s",                              \
-                                  (int)(timespec.tv_sec / 3600),                               \
-                                  (int)((timespec.tv_sec / 60) % 60),                          \
-                                  (int)(timespec.tv_sec % 60),                                 \
-                                  (int)(timespec.tv_nsec / 1000000),                           \
+                                  (int) (timespec.tv_sec / 3600),                               \
+                                  (int) ((timespec.tv_sec / 60) % 60),                          \
+                                  (int) (timespec.tv_sec % 60),                                 \
+                                  (int) (timespec.tv_nsec / 1000000),                           \
                                   __FILE__, __LINE__, __func__);                               \
                         errno = _old_errno;                                                    \
                         ply_logger_inject (logger,                                             \
@@ -113,6 +115,7 @@ bool ply_logger_is_tracing_enabled (ply_logger_t *logger);
 #define ply_logger_trace(logger, format, args ...)
 #define ply_logger_toggle_tracing(logger)
 #define ply_logger_is_tracing_enabled(logger) (false)
+#define ply_logger_is_tracing_to_terminal(logger) (false)
 #endif /* PLY_ENABLE_TRACING */
 
 /* convenience macros
@@ -140,10 +143,11 @@ bool ply_logger_is_tracing_enabled (ply_logger_t *logger);
         ply_logger_toggle_tracing (ply_logger_get_error_default ())
 #define ply_is_tracing()                                                       \
         ply_logger_is_tracing_enabled (ply_logger_get_error_default ())
+#define ply_is_tracing_to_terminal()                                            \
+        ply_logger_is_tracing_to_terminal (ply_logger_get_error_default ())
 #define ply_trace(format, args ...)                                             \
         ply_logger_trace (ply_logger_get_error_default (), format, ## args)
 
 #endif
 
 #endif /* PLY_LOGGER_H */
-/* vim: set ts=4 sw=4 expandtab autoindent cindent cino={.5s,(0: */

@@ -19,7 +19,6 @@
  *
  * Written by: Ray Strode <rstrode@redhat.com>
  */
-#include "config.h"
 
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -55,9 +54,12 @@
 #include "ply-trigger.h"
 #include "ply-utils.h"
 #include "ply-progress.h"
+#include "ply-kmsg-reader.h"
 
 #define BOOT_DURATION_FILE     PLYMOUTH_TIME_DIRECTORY "/boot-duration"
 #define SHUTDOWN_DURATION_FILE PLYMOUTH_TIME_DIRECTORY "/shutdown-duration"
+
+static int crash_fd = -1;
 
 typedef struct
 {
@@ -79,6 +81,7 @@ typedef struct
         ply_event_loop_t       *loop;
         ply_boot_server_t      *boot_server;
         ply_boot_splash_t      *boot_splash;
+        ply_kmsg_reader_t      *kmsg_reader;
         ply_terminal_session_t *session;
         ply_buffer_t           *boot_buffer;
         ply_progress_t         *progress;
@@ -93,6 +96,7 @@ typedef struct
 
         ply_trigger_t          *deactivate_trigger;
         ply_trigger_t          *quit_trigger;
+        ply_trigger_t          *kmsg_trigger;
 
         double                  start_time;
         double                  splash_delay;
@@ -108,6 +112,7 @@ typedef struct
         uint32_t                is_inactive : 1;
         uint32_t                is_shown : 1;
         uint32_t                should_force_details : 1;
+        uint32_t                should_force_default_splash : 1;
         uint32_t                splash_is_becoming_idle : 1;
 
         char                   *override_splash_path;
@@ -138,6 +143,7 @@ static void on_error_message (ply_buffer_t *debug_buffer,
                               size_t        number_of_bytes);
 static ply_buffer_t *debug_buffer;
 static char *debug_buffer_path = NULL;
+static char *boot_log_file = NULL;
 static char *pid_file = NULL;
 static void toggle_between_splash_and_details (state_t *state);
 #ifdef PLY_ENABLE_SYSTEMD_INTEGRATION
@@ -155,9 +161,12 @@ static void on_backspace (state_t *state);
 static void on_quit (state_t       *state,
                      bool           retain_splash,
                      ply_trigger_t *quit_trigger);
+static void on_new_kmsg_message (state_t        *state,
+                                 kmsg_message_t *kmsg_message);
 static bool sh_is_init (state_t *state);
 static void cancel_pending_delayed_show (state_t *state);
 static void prepare_logging (state_t *state);
+static void dump_debug_buffer_to_file (void);
 
 static void
 on_session_output (state_t    *state,
@@ -205,6 +214,8 @@ on_change_mode (state_t    *state,
                 state->mode = PLY_BOOT_SPLASH_MODE_SYSTEM_UPGRADE;
         else if (strcmp (mode, "firmware-upgrade") == 0)
                 state->mode = PLY_BOOT_SPLASH_MODE_FIRMWARE_UPGRADE;
+        else if (strcmp (mode, "system-reset") == 0)
+                state->mode = PLY_BOOT_SPLASH_MODE_SYSTEM_RESET;
         else
                 return;
 
@@ -261,6 +272,35 @@ show_messages (state_t *state)
 }
 
 static bool
+get_theme_path (const char *splash_string,
+                const char *configured_theme_dir,
+                char      **theme_path)
+{
+        const char *paths[] = { PLYMOUTH_RUNTIME_THEME_PATH,
+                                configured_theme_dir,
+                                PLYMOUTH_THEME_PATH };
+        size_t i;
+
+        for (i = 0; i < PLY_NUMBER_OF_ELEMENTS (paths); ++i) {
+                if (paths[i] == NULL)
+                        continue;
+
+                asprintf (theme_path,
+                          "%s/%s/%s.plymouth",
+                          paths[i], splash_string, splash_string);
+                if (ply_file_exists (*theme_path)) {
+                        ply_trace ("Theme is %s", *theme_path);
+                        return true;
+                }
+                ply_trace ("Theme %s not found", *theme_path);
+                free (*theme_path);
+                *theme_path = NULL;
+        }
+
+        return false;
+}
+
+static bool
 load_settings (state_t    *state,
                const char *path,
                char      **theme_path)
@@ -279,42 +319,21 @@ load_settings (state_t    *state,
         splash_string = ply_key_file_get_value (key_file, "Daemon", "Theme");
 
         if (splash_string != NULL) {
-                asprintf (theme_path,
-                          PLYMOUTH_RUNTIME_THEME_PATH "%s/%s.plymouth",
-                          splash_string, splash_string);
-                ply_trace ("Checking if %s exists", *theme_path);
-                if (!ply_file_exists (*theme_path)) {
-                        ply_trace ("%s not found, fallbacking to " PLYMOUTH_THEME_PATH,
-                                   *theme_path);
-                        asprintf (theme_path,
-                                  PLYMOUTH_THEME_PATH "%s/%s.plymouth",
-                                  splash_string, splash_string);
-                }
+                char *configured_theme_dir;
+                configured_theme_dir = ply_key_file_get_value (key_file, "Daemon",
+                                                               "ThemeDir");
+                get_theme_path (splash_string, configured_theme_dir, theme_path);
+                free (configured_theme_dir);
         }
 
         if (isnan (state->splash_delay)) {
-                char *delay_string;
-
-                delay_string = ply_key_file_get_value (key_file, "Daemon", "ShowDelay");
-
-                if (delay_string != NULL) {
-                        state->splash_delay = atof (delay_string);
-                        ply_trace ("Splash delay is set to %lf", state->splash_delay);
-                        free (delay_string);
-                }
+                state->splash_delay = ply_key_file_get_double (key_file, "Daemon", "ShowDelay", NAN);
+                ply_trace ("Splash delay is set to %lf", state->splash_delay);
         }
 
         if (isnan (state->device_timeout)) {
-                char *timeout_string;
-
-                timeout_string = ply_key_file_get_value (key_file, "Daemon", "DeviceTimeout");
-
-                if (timeout_string != NULL) {
-                        state->device_timeout = atof (timeout_string);
-                        ply_trace ("Device timeout is set to %lf", state->device_timeout);
-
-                        free (timeout_string);
-                }
+                state->device_timeout = ply_key_file_get_double (key_file, "Daemon", "DeviceTimeout", NAN);
+                ply_trace ("Device timeout is set to %lf", state->device_timeout);
         }
 
         scale_string = ply_key_file_get_value (key_file, "Daemon", "DeviceScale");
@@ -368,19 +387,9 @@ find_override_splash (state_t *state)
 
         if (splash_string != NULL) {
                 ply_trace ("Splash is configured to be '%s'", splash_string);
-                asprintf (&state->override_splash_path,
-                          PLYMOUTH_RUNTIME_THEME_PATH "%s/%s.plymouth",
-                          splash_string, splash_string);
 
-                ply_trace ("Checking if %s exists", state->override_splash_path);
-                if (!ply_file_exists (state->override_splash_path)) {
-                        ply_trace ("%s not found, fallbacking to " PLYMOUTH_THEME_PATH,
-                                   state->override_splash_path);
-                        free (state->override_splash_path);
-                        asprintf (&state->override_splash_path,
-                                  PLYMOUTH_THEME_PATH "%s/%s.plymouth",
-                                  splash_string, splash_string);
-                }
+                get_theme_path (splash_string, NULL, &state->override_splash_path);
+
                 free (splash_string);
         }
 
@@ -390,7 +399,7 @@ find_override_splash (state_t *state)
                 delay_string = ply_kernel_command_line_get_string_after_prefix ("plymouth.splash-delay=");
 
                 if (delay_string != NULL)
-                        state->splash_delay = atof (delay_string);
+                        state->splash_delay = ply_strtod (delay_string);
         }
 }
 
@@ -416,7 +425,8 @@ find_system_default_splash (state_t *state)
                 return;
         }
 
-        ply_trace ("System configured theme file is '%s'", state->system_default_splash_path);
+        if (state->system_default_splash_path != NULL)
+                ply_trace ("System configured theme file is '%s'", state->system_default_splash_path);
 }
 
 static void
@@ -433,7 +443,8 @@ find_distribution_default_splash (state_t *state)
                 }
         }
 
-        ply_trace ("Distribution default theme file is '%s'", state->distribution_default_splash_path);
+        if (state->distribution_default_splash_path != NULL)
+                ply_trace ("Distribution default theme file is '%s'", state->distribution_default_splash_path);
 }
 
 static void
@@ -588,7 +599,9 @@ on_hide_message (state_t    *state,
                 if (strcmp (list_message, message) == 0) {
                         free (list_message);
                         ply_list_remove_node (state->messages, node);
-                        ply_boot_splash_hide_message (state->boot_splash, message);
+                        if (state->boot_splash != NULL) {
+                                ply_boot_splash_hide_message (state->boot_splash, message);
+                        }
                 }
                 node = next_node;
         }
@@ -653,11 +666,17 @@ on_newroot (state_t    *state,
         }
 
         ply_trace ("new root mounted at \"%s\", switching to it", root_dir);
+
+        if (!strcmp (root_dir, "/run/initramfs") && debug_buffer != NULL) {
+                ply_trace ("switching back to initramfs, dumping debug-buffer now");
+                dump_debug_buffer_to_file ();
+        }
+
         chdir (root_dir);
         chroot (".");
         chdir ("/");
         /* Update local now that we have /usr/share/locale available */
-        setlocale(LC_ALL, "");
+        setlocale (LC_ALL, "");
         ply_progress_load_cache (state->progress, get_cache_file_for_mode (state->mode));
         if (state->boot_splash != NULL)
                 ply_boot_splash_root_mounted (state->boot_splash);
@@ -679,6 +698,7 @@ get_cache_file_for_mode (ply_boot_splash_mode_t mode)
         case PLY_BOOT_SPLASH_MODE_UPDATES:
         case PLY_BOOT_SPLASH_MODE_SYSTEM_UPGRADE:
         case PLY_BOOT_SPLASH_MODE_FIRMWARE_UPGRADE:
+        case PLY_BOOT_SPLASH_MODE_SYSTEM_RESET:
                 filename = NULL;
                 break;
         case PLY_BOOT_SPLASH_MODE_INVALID:
@@ -699,16 +719,21 @@ get_log_file_for_state (state_t *state)
 
         switch (state->mode) {
         case PLY_BOOT_SPLASH_MODE_BOOT_UP:
-                if (state->no_boot_log)
+                if (state->no_boot_log) {
                         filename = NULL;
-                else
-                        filename = PLYMOUTH_LOG_DIRECTORY "/boot.log";
+                } else {
+                        if (boot_log_file == NULL)
+                                filename = PLYMOUTH_LOG_DIRECTORY "/boot.log";
+                        else
+                                filename = boot_log_file;
+                }
                 break;
         case PLY_BOOT_SPLASH_MODE_SHUTDOWN:
         case PLY_BOOT_SPLASH_MODE_REBOOT:
         case PLY_BOOT_SPLASH_MODE_UPDATES:
         case PLY_BOOT_SPLASH_MODE_SYSTEM_UPGRADE:
         case PLY_BOOT_SPLASH_MODE_FIRMWARE_UPGRADE:
+        case PLY_BOOT_SPLASH_MODE_SYSTEM_RESET:
                 filename = _PATH_DEVNULL;
                 break;
         case PLY_BOOT_SPLASH_MODE_INVALID:
@@ -736,6 +761,7 @@ get_log_spool_file_for_mode (ply_boot_splash_mode_t mode)
         case PLY_BOOT_SPLASH_MODE_UPDATES:
         case PLY_BOOT_SPLASH_MODE_SYSTEM_UPGRADE:
         case PLY_BOOT_SPLASH_MODE_FIRMWARE_UPGRADE:
+        case PLY_BOOT_SPLASH_MODE_SYSTEM_RESET:
                 filename = NULL;
                 break;
         case PLY_BOOT_SPLASH_MODE_INVALID:
@@ -849,7 +875,7 @@ sh_is_init (state_t *state)
         if (init_string) {
                 length = strlen (init_string);
                 if (length > 2 && init_string[length - 2] == 's' &&
-                                  init_string[length - 1] == 'h')
+                    init_string[length - 1] == 'h')
                         result = true;
 
                 free (init_string);
@@ -898,9 +924,53 @@ plymouth_should_show_default_splash (state_t *state)
                 return true;
         }
 
+        if (state->should_force_default_splash) {
+                ply_trace ("using default splash because kernel command line has option \"plymouth.graphical\"");
+                return true;
+        }
+
         ply_trace ("no default splash because kernel command line lacks \"splash\" or \"rhgb\"");
         return false;
 }
+
+static void
+on_reload (state_t *state)
+{
+        ply_trace ("reloading");
+        if (state->boot_splash != NULL) {
+                ply_boot_splash_hide (state->boot_splash);
+                ply_boot_splash_free (state->boot_splash);
+                state->boot_splash = NULL;
+        }
+
+        free (state->override_splash_path);
+        state->override_splash_path = NULL;
+        free (state->system_default_splash_path);
+        state->system_default_splash_path = NULL;
+        free (state->distribution_default_splash_path);
+        state->distribution_default_splash_path = NULL;
+
+        find_override_splash (state);
+        find_system_default_splash (state);
+        find_distribution_default_splash (state);
+
+        if (state->is_inactive) {
+                ply_trace ("reload while inactive");
+                return;
+        }
+
+        if (!state->is_shown) {
+                ply_trace ("reload while not shown");
+                return;
+        }
+
+        if (state->showing_details) {
+                show_detailed_splash (state);
+        } else {
+                show_default_splash (state);
+        }
+}
+
 
 static void
 on_show_splash (state_t *state)
@@ -919,6 +989,7 @@ on_show_splash (state_t *state)
 
         if (plymouth_should_ignore_show_splash_calls (state)) {
                 ply_trace ("show splash called while ignoring show splash calls");
+                state->should_retain_splash = true;
                 dump_details_and_quit_splash (state);
                 return;
         }
@@ -928,6 +999,14 @@ on_show_splash (state_t *state)
 
         if (!state->is_attached && state->should_be_attached && has_displays)
                 attach_to_running_session (state);
+
+        if (state->local_console_terminal != NULL)
+                ply_terminal_set_mode (state->local_console_terminal, PLY_TERMINAL_MODE_GRAPHICS);
+
+#ifdef PLY_ENABLE_SYSTEMD_INTEGRATION
+        if (state->is_attached)
+                tell_systemd_to_print_details (state);
+#endif
 
         if (has_displays) {
                 ply_trace ("at least one display already available, so loading splash");
@@ -1008,25 +1087,25 @@ static void
 on_keyboard_removed (state_t        *state,
                      ply_keyboard_t *keyboard)
 {
-    ply_trace ("no longer listening for keystrokes");
-    ply_keyboard_remove_input_handler (keyboard,
-                                       (ply_keyboard_input_handler_t)
-                                       on_keyboard_input);
-    ply_trace ("no longer listening for escape");
-    ply_keyboard_remove_escape_handler (keyboard,
-                                        (ply_keyboard_escape_handler_t)
-                                        on_escape_pressed);
-    ply_trace ("no longer listening for backspace");
-    ply_keyboard_remove_backspace_handler (keyboard,
-                                           (ply_keyboard_backspace_handler_t)
-                                           on_backspace);
-    ply_trace ("no longer listening for enter");
-    ply_keyboard_remove_enter_handler (keyboard,
-                                       (ply_keyboard_enter_handler_t)
-                                       on_enter);
+        ply_trace ("no longer listening for keystrokes");
+        ply_keyboard_remove_input_handler (keyboard,
+                                           (ply_keyboard_input_handler_t)
+                                           on_keyboard_input);
+        ply_trace ("no longer listening for escape");
+        ply_keyboard_remove_escape_handler (keyboard,
+                                            (ply_keyboard_escape_handler_t)
+                                            on_escape_pressed);
+        ply_trace ("no longer listening for backspace");
+        ply_keyboard_remove_backspace_handler (keyboard,
+                                               (ply_keyboard_backspace_handler_t)
+                                               on_backspace);
+        ply_trace ("no longer listening for enter");
+        ply_keyboard_remove_enter_handler (keyboard,
+                                           (ply_keyboard_enter_handler_t)
+                                           on_enter);
 
-    if (state->boot_splash != NULL)
-            ply_boot_splash_unset_keyboard (state->boot_splash);
+        if (state->boot_splash != NULL)
+                ply_boot_splash_unset_keyboard (state->boot_splash);
 }
 
 static void
@@ -1149,8 +1228,10 @@ hide_splash (state_t *state)
 
         ply_boot_splash_hide (state->boot_splash);
 
-        if (state->local_console_terminal != NULL)
+        if (state->local_console_terminal != NULL) {
                 ply_terminal_set_mode (state->local_console_terminal, PLY_TERMINAL_MODE_TEXT);
+                ply_terminal_set_buffered_input (state->local_console_terminal);
+        }
 }
 
 static void
@@ -1173,6 +1254,7 @@ on_hide_splash (state_t *state)
                 return;
 
         ply_trace ("hiding boot splash");
+        state->should_retain_splash = true;
         dump_details_and_quit_splash (state);
 }
 
@@ -1216,7 +1298,6 @@ deactivate_console (state_t *state)
         /* do not let any tty opened where we could write after deactivate */
         if (ply_kernel_command_line_has_argument ("plymouth.debug"))
                 ply_logger_close_file (ply_logger_get_error_default ());
-
 }
 
 static void
@@ -1357,10 +1438,6 @@ on_quit (state_t       *state,
         state->quit_trigger = quit_trigger;
         state->should_retain_splash = retain_splash;
 
-#ifdef PLY_ENABLE_SYSTEMD_INTEGRATION
-        tell_systemd_to_stop_printing_details (state);
-#endif
-
         ply_trace ("closing log");
         if (state->session != NULL)
                 ply_terminal_session_close_log (state->session);
@@ -1383,6 +1460,18 @@ on_quit (state_t       *state,
                 }
         } else {
                 quit_program (state);
+        }
+}
+
+void
+on_new_kmsg_message (state_t        *state,
+                     kmsg_message_t *kmsg_message)
+{
+        ply_buffer_append (state->boot_buffer, "%s\n", kmsg_message->message);
+
+        if (state->boot_splash != NULL) {
+                ply_boot_splash_update_output (state->boot_splash, kmsg_message->message, strlen (kmsg_message->message));
+                ply_boot_splash_update_output (state->boot_splash, "\n", 1);
         }
 }
 
@@ -1420,6 +1509,7 @@ start_boot_server (state_t *state)
                                       (ply_boot_server_reactivate_handler_t) on_reactivate,
                                       (ply_boot_server_quit_handler_t) on_quit,
                                       (ply_boot_server_has_active_vt_handler_t) on_has_active_vt,
+                                      (ply_boot_server_reload_handler_t) on_reload,
                                       state);
 
         if (!ply_boot_server_listen (server)) {
@@ -1432,6 +1522,19 @@ start_boot_server (state_t *state)
         ply_boot_server_attach_to_event_loop (server, state->loop);
 
         return server;
+}
+
+static bool
+validate_input (state_t    *state,
+                const char *entry_text,
+                const char *add_text)
+{
+        bool input_valid;
+
+        if (!state->boot_splash)
+                return true;
+        input_valid = ply_boot_splash_validate_input (state->boot_splash, entry_text, add_text);
+        return input_valid;
 }
 
 
@@ -1451,10 +1554,18 @@ update_display (state_t *state)
                         ply_boot_splash_display_password (state->boot_splash,
                                                           entry_trigger->prompt,
                                                           bullets);
+                        ply_boot_splash_display_prompt (state->boot_splash,
+                                                        entry_trigger->prompt,
+                                                        ply_buffer_get_bytes (state->entry_buffer),
+                                                        true);
                 } else if (entry_trigger->type == PLY_ENTRY_TRIGGER_TYPE_QUESTION) {
                         ply_boot_splash_display_question (state->boot_splash,
                                                           entry_trigger->prompt,
                                                           ply_buffer_get_bytes (state->entry_buffer));
+                        ply_boot_splash_display_prompt (state->boot_splash,
+                                                        entry_trigger->prompt,
+                                                        ply_buffer_get_bytes (state->entry_buffer),
+                                                        false);
                 } else {
                         ply_trace ("unkown entry type");
                 }
@@ -1487,7 +1598,17 @@ static void
 on_escape_pressed (state_t *state)
 {
         ply_trace ("escape key pressed");
-        toggle_between_splash_and_details (state);
+        bool has_vt_consoles = true;
+
+        if (state->local_console_terminal != NULL) {
+                if (!ply_terminal_is_vt (state->local_console_terminal))
+                        has_vt_consoles = false;
+        } else {
+                has_vt_consoles = false;
+        }
+
+        if (validate_input (state, "", "\e") && has_vt_consoles == true)
+                toggle_between_splash_and_details (state);
 }
 
 static void
@@ -1499,12 +1620,16 @@ on_keyboard_input (state_t    *state,
 
         node = ply_list_get_first_node (state->entry_triggers);
         if (node) { /* \x3 (ETX) is Ctrl+C and \x4 (EOT) is Ctrl+D */
+                if (!validate_input (state, ply_buffer_get_bytes (state->entry_buffer), keyboard_input))
+                        return;
                 if (character_size == 1 && (keyboard_input[0] == '\x3' || keyboard_input[0] == '\x4')) {
                         ply_entry_trigger_t *entry_trigger = ply_list_node_get_data (node);
                         ply_trigger_pull (entry_trigger->trigger, "\x3");
                         ply_buffer_clear (state->entry_buffer);
                         ply_list_remove_node (state->entry_triggers, node);
                         free (entry_trigger);
+                } else if (character_size >= 2 && keyboard_input[0] == '\033') {
+                        /* Ignore escape sequences */
                 } else {
                         ply_buffer_append_bytes (state->entry_buffer, keyboard_input, character_size);
                 }
@@ -1527,28 +1652,17 @@ on_keyboard_input (state_t    *state,
 static void
 on_backspace (state_t *state)
 {
-        ssize_t bytes_to_remove;
-        ssize_t previous_character_size;
-        const char *bytes;
+        char *bytes;
         size_t size;
+        size_t capacity;
         ply_list_node_t *node = ply_list_get_first_node (state->entry_triggers);
 
         if (!node) return;
 
-        bytes = ply_buffer_get_bytes (state->entry_buffer);
-        size = ply_buffer_get_size (state->entry_buffer);
-        if (size == 0)
-                return;
-
-        bytes_to_remove = MIN (size, PLY_UTF8_CHARACTER_SIZE_MAX);
-        while ((previous_character_size = ply_utf8_character_get_size (bytes + size - bytes_to_remove, bytes_to_remove)) < bytes_to_remove) {
-                if (previous_character_size > 0)
-                        bytes_to_remove -= previous_character_size;
-                else
-                        bytes_to_remove--;
+        ply_buffer_borrow_bytes (state->entry_buffer, &bytes, &size, &capacity) {
+                ply_utf8_string_remove_last_character (&bytes, &size);
         }
 
-        ply_buffer_remove_bytes_at_end (state->entry_buffer, bytes_to_remove);
         update_display (state);
 }
 
@@ -1562,6 +1676,8 @@ on_enter (state_t    *state,
         if (node) {
                 ply_entry_trigger_t *entry_trigger = ply_list_node_get_data (node);
                 const char *reply_text = ply_buffer_get_bytes (state->entry_buffer);
+                if (!validate_input (state, reply_text, "\n"))
+                        return;
                 ply_trigger_pull (entry_trigger->trigger, reply_text);
                 ply_buffer_clear (state->entry_buffer);
                 ply_list_remove_node (state->entry_triggers, node);
@@ -1785,6 +1901,18 @@ attach_to_running_session (state_t *state)
                 return false;
         }
 
+        if (state->kmsg_reader == NULL) {
+                ply_trace ("Creating new kmsg reader");
+                state->kmsg_reader = ply_kmsg_reader_new ();
+
+                ply_kmsg_reader_watch_for_messages (state->kmsg_reader,
+                                                    (ply_kmsg_reader_message_handler_t)
+                                                    on_new_kmsg_message,
+                                                    state);
+        }
+
+        ply_kmsg_reader_start (state->kmsg_reader);
+
 #ifdef PLY_ENABLE_SYSTEMD_INTEGRATION
         tell_systemd_to_print_details (state);
 #endif
@@ -1808,6 +1936,9 @@ detach_from_running_session (state_t *state)
 #ifdef PLY_ENABLE_SYSTEMD_INTEGRATION
         tell_systemd_to_stop_printing_details (state);
 #endif
+
+        ply_trace ("stopping kmsg reader");
+        ply_kmsg_reader_stop (state->kmsg_reader);
 
         ply_trace ("detaching from terminal session");
         ply_terminal_session_detach (state->session);
@@ -1841,10 +1972,13 @@ check_verbosity (state_t *state)
                         ply_trace ("streaming debug output to %s instead of screen", stream);
                         fd = open (stream, O_RDWR | O_NOCTTY | O_CREAT, 0600);
 
-                        if (fd < 0)
+                        if (fd < 0) {
                                 ply_trace ("could not stream output to %s: %m", stream);
-                        else
+                        } else {
                                 ply_logger_set_output_fd (ply_logger_get_error_default (), fd);
+                                crash_fd = fd;
+                        }
+
                         free (stream);
                 } else {
                         const char *device;
@@ -1873,8 +2007,13 @@ check_verbosity (state_t *state)
         }
 
         if (debug_buffer != NULL) {
-                if (debug_buffer_path == NULL)
-                        debug_buffer_path = strdup (PLYMOUTH_LOG_DIRECTORY "/plymouth-debug.log");
+                if (debug_buffer_path == NULL) {
+                        if (state->mode == PLY_BOOT_SPLASH_MODE_SHUTDOWN ||
+                            state->mode == PLY_BOOT_SPLASH_MODE_REBOOT)
+                                debug_buffer_path = strdup (PLYMOUTH_LOG_DIRECTORY "/plymouth-shutdown-debug.log");
+                        else
+                                debug_buffer_path = strdup (PLYMOUTH_LOG_DIRECTORY "/plymouth-debug.log");
+                }
 
                 ply_logger_add_filter (ply_logger_get_error_default (),
                                        (ply_logger_filter_handler_t)
@@ -1889,6 +2028,9 @@ check_logging (state_t *state)
         bool kernel_no_log;
 
         ply_trace ("checking if console messages should be redirected and logged");
+
+        if (!boot_log_file)
+                boot_log_file = ply_kernel_command_line_get_key_value ("plymouth.boot-log=");
 
         kernel_no_log = ply_kernel_command_line_has_argument ("plymouth.nolog");
         if (kernel_no_log)
@@ -1956,8 +2098,10 @@ initialize_environment (state_t *state)
 
                 ply_trace ("checking if '%s' exists", state->default_tty);
                 if (!ply_character_device_exists (state->default_tty)) {
-                        ply_trace ("nope, forcing details mode");
-                        state->should_force_details = true;
+                        if (!state->should_force_default_splash) {
+                                ply_trace ("nope, forcing details mode");
+                                state->should_force_details = true;
+                        }
 
                         state->default_tty = find_fallback_tty (state);
                         ply_trace ("going to go with '%s'", state->default_tty);
@@ -1974,7 +2118,7 @@ initialize_environment (state_t *state)
         state->entry_buffer = ply_buffer_new ();
         state->messages = ply_list_new ();
 
-        if (!ply_is_tracing ())
+        if (!ply_is_tracing_to_terminal ())
                 redirect_standard_io_to_dev_null ();
 
         ply_trace ("Making sure " PLYMOUTH_RUNTIME_DIR " exists");
@@ -2014,6 +2158,70 @@ dump_debug_buffer_to_file (void)
 
 #include <termios.h>
 #include <unistd.h>
+#include <execinfo.h>
+
+#define BACKTRACE_SIZE 1024
+#define MAPS_SIZE 8192
+#define BACKTRACE_FRAMES_TO_SKIP 2 /* write_backtrace and on_crash themselves */
+
+static void
+write_maps (int output_fd)
+{
+        char maps_buffer[MAPS_SIZE];
+        ssize_t bytes_read;
+        ssize_t line_start = 0, buffer_end = 0;
+        int fd;
+
+        write (output_fd, "maps:\n", strlen ("maps:\n"));
+        fd = open ("/proc/self/maps", O_RDONLY);
+
+        if (fd < 0)
+                return;
+
+        while ((bytes_read = read (fd, maps_buffer + buffer_end, MAPS_SIZE - buffer_end)) > 0) {
+                bytes_read += buffer_end;
+                buffer_end = 0;
+
+                for (ssize_t i = line_start; i < bytes_read; ++i) {
+                        if (maps_buffer[i] == '\n') {
+                                write (output_fd, maps_buffer + line_start, i - line_start + 1);
+                                line_start = i + 1;
+                        }
+                }
+
+                if (line_start < bytes_read) {
+                        memmove (maps_buffer, maps_buffer + line_start, bytes_read - line_start);
+                        buffer_end = bytes_read - line_start;
+                        line_start = 0;
+                } else {
+                        line_start = 0;
+                }
+        }
+
+        if (buffer_end > 0) {
+                write (output_fd, maps_buffer, buffer_end);
+        }
+
+        close (fd);
+}
+
+static void
+write_backtrace (int output_fd)
+{
+        void *addresses[BACKTRACE_SIZE];
+        int number_of_addresses;
+
+        write (output_fd, "backtrace:\n", strlen ("backtrace:\n"));
+        number_of_addresses = backtrace (addresses, BACKTRACE_SIZE);
+
+        if (number_of_addresses <= BACKTRACE_FRAMES_TO_SKIP)
+                return;
+
+        backtrace_symbols_fd (addresses + BACKTRACE_FRAMES_TO_SKIP,
+                              number_of_addresses - BACKTRACE_FRAMES_TO_SKIP,
+                              output_fd);
+}
+
 static void
 on_crash (int signum)
 {
@@ -2021,22 +2229,29 @@ on_crash (int signum)
         int fd;
         static const char *show_cursor_sequence = "\033[?25h";
 
-        fd = open ("/dev/tty1", O_RDWR | O_NOCTTY);
-        if (fd < 0) fd = open ("/dev/hvc0", O_RDWR | O_NOCTTY);
+        if (crash_fd != -1) {
+                fd = crash_fd;
+        } else {
+                fd = open ("/dev/tty1", O_RDWR | O_NOCTTY);
+                if (fd < 0) fd = open ("/dev/hvc0", O_RDWR | O_NOCTTY);
+        }
 
-        ioctl (fd, KDSETMODE, KD_TEXT);
+        if (fd >= 0) {
+                ioctl (fd, KDSETMODE, KD_TEXT);
 
-        write (fd, show_cursor_sequence, sizeof (show_cursor_sequence) - 1);
+                write (fd, show_cursor_sequence, sizeof(show_cursor_sequence) - 1);
 
-        tcgetattr (fd, &term_attributes);
+                tcgetattr (fd, &term_attributes);
 
-        term_attributes.c_iflag |= BRKINT | IGNPAR | ICRNL | IXON;
-        term_attributes.c_oflag |= OPOST;
-        term_attributes.c_lflag |= ECHO | ICANON | ISIG | IEXTEN;
+                term_attributes.c_iflag |= BRKINT | IGNPAR | ICRNL | IXON;
+                term_attributes.c_oflag |= OPOST;
+                term_attributes.c_lflag |= ECHO | ICANON | ISIG | IEXTEN;
 
-        tcsetattr (fd, TCSAFLUSH, &term_attributes);
+                tcsetattr (fd, TCSAFLUSH, &term_attributes);
 
-        close (fd);
+                write_maps (fd);
+                write_backtrace (fd);
+        }
 
         if (debug_buffer != NULL) {
                 dump_debug_buffer_to_file ();
@@ -2051,6 +2266,43 @@ on_crash (int signum)
 
         signal (signum, SIG_DFL);
         raise (signum);
+}
+
+static void
+start_plymouthd_fd_escrow (void)
+{
+        pid_t pid;
+
+        pid = fork ();
+        if (pid == 0) {
+                const char *argv[] = { PLYMOUTH_DRM_ESCROW_DIRECTORY "/plymouthd-fd-escrow", NULL };
+
+                execve (argv[0], (char * const *) argv, NULL);
+                ply_trace ("could not launch fd escrow process: %m");
+                _exit (1);
+        }
+}
+
+static void
+on_term_signal (state_t *state)
+{
+        bool retain_splash = false;
+
+        ply_trace ("received SIGTERM");
+
+        /*
+         * On shutdown/reboot with pixel-displays active, start the plymouthd-fd-escrow
+         * helper to hold on to the pixel-displays fds until the end.
+         */
+        if ((state->mode == PLY_BOOT_SPLASH_MODE_SHUTDOWN ||
+             state->mode == PLY_BOOT_SPLASH_MODE_REBOOT) &&
+            !state->is_inactive && state->boot_splash &&
+            ply_boot_splash_uses_pixel_displays (state->boot_splash)) {
+                start_plymouthd_fd_escrow ();
+                retain_splash = true;
+        }
+
+        on_quit (state, retain_splash, ply_trigger_new (NULL));
 }
 
 static void
@@ -2077,6 +2329,8 @@ main (int    argc,
         bool no_boot_log = false;
         bool no_daemon = false;
         bool debug = false;
+        bool ignore_serial_consoles = false;
+        bool graphical_boot = false;
         bool attach_to_session;
         ply_daemon_handle_t *daemon_handle = NULL;
         char *mode_string = NULL;
@@ -2089,6 +2343,10 @@ main (int    argc,
 
         state.loop = ply_event_loop_get_default ();
 
+        /* Initialize the translations if they are available (!initrd) */
+        if (ply_file_exists (PLYMOUTH_LOCALE_DIRECTORY "/nl/LC_MESSAGES/plymouth.mo"))
+                setlocale (LC_ALL, "");
+
         ply_command_parser_add_options (state.command_parser,
                                         "help", "This help message", PLY_COMMAND_OPTION_TYPE_FLAG,
                                         "attach-to-session", "Redirect console messages from screen to log", PLY_COMMAND_OPTION_TYPE_FLAG,
@@ -2100,6 +2358,8 @@ main (int    argc,
                                         "kernel-command-line", "Fake kernel command line to use", PLY_COMMAND_OPTION_TYPE_STRING,
                                         "tty", "TTY to use instead of default", PLY_COMMAND_OPTION_TYPE_STRING,
                                         "no-boot-log", "Do not write boot log file", PLY_COMMAND_OPTION_TYPE_FLAG,
+                                        "ignore-serial-consoles", "Ignore serial consoles", PLY_COMMAND_OPTION_TYPE_FLAG,
+                                        "graphical-boot", "Use graphical splashes even if the kernel console is not a VT", PLY_COMMAND_OPTION_TYPE_FLAG,
                                         NULL);
 
         if (!ply_command_parser_parse_arguments (state.command_parser, state.loop, argv, argc)) {
@@ -2120,7 +2380,10 @@ main (int    argc,
                                         "no-boot-log", &no_boot_log,
                                         "no-daemon", &no_daemon,
                                         "debug", &debug,
+                                        "ignore-serial-consoles", &ignore_serial_consoles,
+                                        "graphical-boot", &graphical_boot,
                                         "debug-file", &debug_buffer_path,
+                                        "boot-log", &boot_log_file,
                                         "pid-file", &pid_file,
                                         "tty", &tty,
                                         "kernel-command-line", &kernel_command_line,
@@ -2154,6 +2417,8 @@ main (int    argc,
                         state.mode = PLY_BOOT_SPLASH_MODE_SYSTEM_UPGRADE;
                 else if (strcmp (mode_string, "firmware-upgrade") == 0)
                         state.mode = PLY_BOOT_SPLASH_MODE_FIRMWARE_UPGRADE;
+                else if (strcmp (mode_string, "system-reset") == 0)
+                        state.mode = PLY_BOOT_SPLASH_MODE_SYSTEM_RESET;
                 else
                         state.mode = PLY_BOOT_SPLASH_MODE_BOOT_UP;
 
@@ -2190,6 +2455,12 @@ main (int    argc,
 
         signal (SIGABRT, on_crash);
         signal (SIGSEGV, on_crash);
+        signal (SIGFPE, on_crash);
+
+        if (graphical_boot || ply_kernel_command_line_has_argument ("plymouth.graphical")) {
+                state.should_force_default_splash = true;
+                ignore_serial_consoles = true;
+        }
 
         /* before do anything we need to make sure we have a working
          * environment.
@@ -2208,11 +2479,18 @@ main (int    argc,
         }
 
         /* Make the first byte in argv be '@' so that we can survive systemd's killing
-         * spree when going from initrd to /, and so we stay alive all the way until
-         * the power is killed at shutdown.
+         * spree when going from initrd to /
          * http://www.freedesktop.org/wiki/Software/systemd/RootStorageDaemons
+         * Note ply_file_exists () does not work here because /etc/initrd-release
+         * is a symlink when using a dracut generated initrd.
          */
-        argv[0][0] = '@';
+        if (state.mode == PLY_BOOT_SPLASH_MODE_BOOT_UP &&
+            access ("/etc/initrd-release", F_OK) >= 0)
+                argv[0][0] = '@';
+
+        /* Catch SIGTERM for clean shutdown on poweroff/reboot */
+        ply_event_loop_watch_signal (state.loop, SIGTERM,
+                                     (ply_event_handler_t) on_term_signal, &state);
 
         state.boot_server = start_boot_server (&state);
 
@@ -2256,12 +2534,18 @@ main (int    argc,
         find_system_default_splash (&state);
         find_distribution_default_splash (&state);
 
-        if (ply_kernel_command_line_has_argument ("plymouth.ignore-serial-consoles"))
+        if (ply_kernel_command_line_has_argument ("plymouth.ignore-serial-consoles") ||
+            ignore_serial_consoles == true)
                 device_manager_flags |= PLY_DEVICE_MANAGER_FLAGS_IGNORE_SERIAL_CONSOLES;
 
         if (ply_kernel_command_line_has_argument ("plymouth.ignore-udev") ||
             (getenv ("DISPLAY") != NULL))
                 device_manager_flags |= PLY_DEVICE_MANAGER_FLAGS_IGNORE_UDEV;
+
+        if ((ply_kernel_command_line_has_argument ("plymouth.force-frame-buffer-on-boot")) &&
+            state.mode != PLY_BOOT_SPLASH_MODE_SHUTDOWN &&
+            state.mode != PLY_BOOT_SPLASH_MODE_REBOOT)
+                device_manager_flags |= PLY_DEVICE_MANAGER_FLAGS_FORCE_FRAME_BUFFER;
 
         if (!plymouth_should_show_default_splash (&state)) {
                 /* don't bother listening for udev events or setting up a graphical renderer
@@ -2304,6 +2588,9 @@ main (int    argc,
 
         ply_free_error_log ();
 
+        free (state.override_splash_path);
+        free (state.system_default_splash_path);
+        free (state.distribution_default_splash_path);
+
         return exit_code;
 }
-/* vim: set ts=4 ts=4 sw=4 expandtab autoindent cindent cino={.5s,(0: */

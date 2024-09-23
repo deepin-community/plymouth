@@ -20,7 +20,6 @@
  * Written by: Adam Jackson <ajax@redhat.com>
  *             Ray Strode <rstrode@redhat.com>
  */
-#include "config.h"
 
 #include <assert.h>
 #include <errno.h>
@@ -239,11 +238,10 @@ view_hide (view_t *view)
 
                 terminal = ply_text_display_get_terminal (view->display);
 
+                ply_terminal_reset_colors (terminal);
                 ply_text_display_set_background_color (view->display, PLY_TERMINAL_COLOR_DEFAULT);
                 ply_text_display_clear_screen (view->display);
                 ply_text_display_show_cursor (view->display);
-
-                ply_terminal_reset_colors (terminal);
         }
 }
 
@@ -727,4 +725,3 @@ ply_boot_splash_plugin_get_interface (void)
         return &plugin_interface;
 }
 
-/* vim: set ts=4 sw=4 expandtab autoindent cindent cino={.5s,(0: */
