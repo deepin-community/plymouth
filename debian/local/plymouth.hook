@@ -128,18 +128,6 @@ case "${THEME_NAME}" in
 			mkdir -p "${DESTDIR}/etc/default"
 			cp /etc/default/keyboard "${DESTDIR}/etc/default"
 		fi
-
-		# for two-step
-		case "$(sed -n 's/^ModuleName=\(.*\)/\1/p' ${THEME})" in
-			two-step)
-				# add watermark.png
-				logo=/usr/share/desktop-base/debian-logos/logo-text-version-64.png
-				if [ -e $logo ]
-				then
-					cp $logo "${DESTDIR}/${IMAGE_DIR}/watermark.png"
-				fi
-				;;
-		esac
 		;;
 esac
 
