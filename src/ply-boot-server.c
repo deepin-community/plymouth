@@ -19,7 +19,6 @@
  *
  * Written by: Ray Strode <rstrode@redhat.com>
  */
-#include "config.h"
 #include "ply-boot-server.h"
 
 #include <assert.h>
@@ -47,7 +46,10 @@ typedef struct
         uid_t              uid;
         pid_t              pid;
 
+        int                reference_count;
+
         uint32_t           credentials_read : 1;
+        uint32_t           disconnected : 1;
 } ply_boot_connection_t;
 
 struct _ply_boot_server
@@ -77,6 +79,7 @@ struct _ply_boot_server
         ply_boot_server_reactivate_handler_t          reactivate_handler;
         ply_boot_server_quit_handler_t                quit_handler;
         ply_boot_server_has_active_vt_handler_t       has_active_vt_handler;
+        ply_boot_server_reload_handler_t              reload_handler;
         void                                         *user_data;
 
         uint32_t                                      is_listening : 1;
@@ -103,6 +106,7 @@ ply_boot_server_new (ply_boot_server_update_handler_t              update_handle
                      ply_boot_server_reactivate_handler_t          reactivate_handler,
                      ply_boot_server_quit_handler_t                quit_handler,
                      ply_boot_server_has_active_vt_handler_t       has_active_vt_handler,
+                     ply_boot_server_reload_handler_t              reload_handler,
                      void                                         *user_data)
 {
         ply_boot_server_t *server;
@@ -132,6 +136,7 @@ ply_boot_server_new (ply_boot_server_update_handler_t              update_handle
         server->reactivate_handler = reactivate_handler;
         server->quit_handler = quit_handler;
         server->has_active_vt_handler = has_active_vt_handler;
+        server->reload_handler = reload_handler;
         server->user_data = user_data;
 
         return server;
@@ -165,6 +170,7 @@ ply_boot_connection_new (ply_boot_server_t *server,
         connection->fd = fd;
         connection->server = server;
         connection->watch = NULL;
+        connection->reference_count = 1;
 
         return connection;
 }
@@ -177,6 +183,26 @@ ply_boot_connection_free (ply_boot_connection_t *connection)
 
         close (connection->fd);
         free (connection);
+}
+
+static void
+ply_boot_connection_take_reference (ply_boot_connection_t *connection)
+{
+        connection->reference_count++;
+}
+
+static void
+ply_boot_connection_drop_reference (ply_boot_connection_t *connection)
+{
+        if (connection == NULL)
+                return;
+
+        connection->reference_count--;
+
+        assert (connection->reference_count >= 0);
+
+        if (connection->reference_count == 0)
+                ply_boot_connection_free (connection);
 }
 
 bool
@@ -292,30 +318,43 @@ ply_boot_connection_on_password_answer (ply_boot_connection_t *connection,
 {
         ply_trace ("got password answer");
 
-        ply_boot_connection_send_answer (connection, password);
+        if (!connection->disconnected)
+                ply_boot_connection_send_answer (connection, password);
+
         if (password != NULL)
                 ply_list_append_data (connection->server->cached_passwords,
                                       strdup (password));
+
+        ply_boot_connection_drop_reference (connection);
 }
 
 static void
 ply_boot_connection_on_deactivated (ply_boot_connection_t *connection)
 {
         ply_trace ("deactivated");
-        if (!ply_write (connection->fd,
-                        PLY_BOOT_PROTOCOL_RESPONSE_TYPE_ACK,
-                        strlen (PLY_BOOT_PROTOCOL_RESPONSE_TYPE_ACK)))
-                ply_trace ("could not finish writing deactivate reply: %m");
+
+        if (!connection->disconnected) {
+                if (!ply_write (connection->fd,
+                                PLY_BOOT_PROTOCOL_RESPONSE_TYPE_ACK,
+                                strlen (PLY_BOOT_PROTOCOL_RESPONSE_TYPE_ACK)))
+                        ply_trace ("could not finish writing deactivate reply: %m");
+        }
+
+        ply_boot_connection_drop_reference (connection);
 }
 
 static void
 ply_boot_connection_on_quit_complete (ply_boot_connection_t *connection)
 {
         ply_trace ("quit complete");
-        if (!ply_write (connection->fd,
-                        PLY_BOOT_PROTOCOL_RESPONSE_TYPE_ACK,
-                        strlen (PLY_BOOT_PROTOCOL_RESPONSE_TYPE_ACK)))
-                ply_trace ("could not finish writing quit reply: %m");
+        if (!connection->disconnected) {
+                if (!ply_write (connection->fd,
+                                PLY_BOOT_PROTOCOL_RESPONSE_TYPE_ACK,
+                                strlen (PLY_BOOT_PROTOCOL_RESPONSE_TYPE_ACK)))
+                        ply_trace ("could not finish writing quit reply: %m");
+        }
+
+        ply_boot_connection_drop_reference (connection);
 }
 
 static void
@@ -323,7 +362,10 @@ ply_boot_connection_on_question_answer (ply_boot_connection_t *connection,
                                         const char            *answer)
 {
         ply_trace ("got question answer: %s", answer);
-        ply_boot_connection_send_answer (connection, answer);
+        if (!connection->disconnected)
+                ply_boot_connection_send_answer (connection, answer);
+
+        ply_boot_connection_drop_reference (connection);
 }
 
 static void
@@ -331,7 +373,10 @@ ply_boot_connection_on_keystroke_answer (ply_boot_connection_t *connection,
                                          const char            *key)
 {
         ply_trace ("got key: %s", key);
-        ply_boot_connection_send_answer (connection, key);
+        if (!connection->disconnected)
+                ply_boot_connection_send_answer (connection, key);
+
+        ply_boot_connection_drop_reference (connection);
 }
 
 static void
@@ -464,6 +509,7 @@ ply_boot_connection_on_request (ply_boot_connection_t *connection)
                                          (ply_trigger_handler_t)
                                          ply_boot_connection_on_deactivated,
                                          connection);
+                ply_boot_connection_take_reference (connection);
 
                 if (server->deactivate_handler != NULL)
                         server->deactivate_handler (server->user_data, deactivate_trigger, server);
@@ -491,6 +537,7 @@ ply_boot_connection_on_request (ply_boot_connection_t *connection)
                                          (ply_trigger_handler_t)
                                          ply_boot_connection_on_quit_complete,
                                          connection);
+                ply_boot_connection_take_reference (connection);
 
                 if (server->quit_handler != NULL)
                         server->quit_handler (server->user_data, retain_splash, quit_trigger, server);
@@ -500,6 +547,10 @@ ply_boot_connection_on_request (ply_boot_connection_t *connection)
                 free (argument);
                 free (command);
                 return;
+        } else if (strcmp (command, PLY_BOOT_PROTOCOL_REQUEST_TYPE_RELOAD) == 0) {
+                ply_trace ("got reload request");
+                if (server->reload_handler != NULL)
+                        server->reload_handler (server->user_data, server);
         } else if (strcmp (command, PLY_BOOT_PROTOCOL_REQUEST_TYPE_PASSWORD) == 0) {
                 ply_trigger_t *answer;
 
@@ -510,6 +561,7 @@ ply_boot_connection_on_request (ply_boot_connection_t *connection)
                                          (ply_trigger_handler_t)
                                          ply_boot_connection_on_password_answer,
                                          connection);
+                ply_boot_connection_take_reference (connection);
 
                 if (server->ask_for_password_handler != NULL) {
                         server->ask_for_password_handler (server->user_data,
@@ -594,6 +646,7 @@ ply_boot_connection_on_request (ply_boot_connection_t *connection)
                                          (ply_trigger_handler_t)
                                          ply_boot_connection_on_question_answer,
                                          connection);
+                ply_boot_connection_take_reference (connection);
 
                 if (server->ask_question_handler != NULL) {
                         server->ask_question_handler (server->user_data,
@@ -626,6 +679,7 @@ ply_boot_connection_on_request (ply_boot_connection_t *connection)
                                          (ply_trigger_handler_t)
                                          ply_boot_connection_on_keystroke_answer,
                                          connection);
+                ply_boot_connection_take_reference (connection);
 
                 if (server->watch_for_keystroke_handler != NULL) {
                         server->watch_for_keystroke_handler (server->user_data,
@@ -707,13 +761,15 @@ ply_boot_connection_on_hangup (ply_boot_connection_t *connection)
         assert (connection != NULL);
         assert (connection->server != NULL);
 
+        connection->disconnected = true;
+
         server = connection->server;
 
         node = ply_list_find_node (server->connections, connection);
 
         assert (node != NULL);
 
-        ply_boot_connection_free (connection);
+        ply_boot_connection_drop_reference (connection);
         ply_list_remove_node (server->connections, node);
 }
 
@@ -780,4 +836,3 @@ ply_boot_server_attach_to_event_loop (ply_boot_server_t *server,
                                        server);
 }
 
-/* vim: set ts=4 sw=4 expandtab autoindent cindent cino={.5s,(0: */
