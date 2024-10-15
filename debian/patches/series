@@ -6,3 +6,4 @@ fallback-etc-default-keyboard.patch
 ply-boot-splash-Set-unbuffered-input-when-creating-a.patch
 0001-main-Go-back-to-text-mode-when-quitting-if-appropria.patch
 0002-main-Correctly-switch-back-to-text-mode-if-the-splas.patch
+fix-default-plymouth-theme.patch

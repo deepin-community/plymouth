@@ -1,0 +1,16 @@
+From: Yutao Meng <mengyutao@deepin.org>
+Subject: Fix overwriting default deepin plymouth theme after upgrade
+
+* src/plymouthd.conf: Add deepin theme settings
+
+Bug: https://pms.uniontech.com/bug-view-276459.html
+Index: plymouth/src/plymouthd.conf
+===================================================================
+--- plymouth.orig/src/plymouthd.conf
++++ plymouth/src/plymouthd.conf
+@@ -2,3 +2,5 @@
+ #[Daemon]
+ #Theme=emerald
+ #ShowDelay=0
++[Daemon]
++Theme=deepin-logo
