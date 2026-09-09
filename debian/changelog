@@ -1,3 +1,9 @@
+plymouth (24.004.60-2deepin6) unstable; urgency=medium
+
+  * feat: add dconfig support for customizing boot theme (force-theme)
+
+ -- xinpeng.wang <wangxinpeng@uniontech.com>  Wed, 09 Sep 2026 13:27:40 +0800
+
 plymouth (24.004.60-2deepin5) unstable; urgency=medium
 
   * fix: Logo not centered when multiple monitors are used.
@@ -1196,3 +1202,4 @@ plymouth (0.6.0-1) experimental; urgency=low
   * Initial release (Closes: #506899).
 
  -- Daniel Baumann <mail@daniel-baumann.ch>  Sat, 07 Feb 2009 19:02:00 +0100
+

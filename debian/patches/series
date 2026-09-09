@@ -10,3 +10,4 @@ fix-default-plymouth-theme.patch
 reset-msg-positon-on-two-step.patch
 uniontech-retry-when-open-drm-failed.patch
 0001-Fix-script-Ensure-Window.GetX-Y-returns-0-for-correc.patch
+uniontech-plymouth-dconfig-theme.patch

@@ -1,0 +1,78 @@
+Index: deepin-plymouth/dconfig/org.plymouth.theme.json
+===================================================================
+--- /dev/null
++++ deepin-plymouth/dconfig/org.plymouth.theme.json
+@@ -0,0 +1,16 @@
++{
++    "magic": "dsg.config.meta",
++    "version": "1.0",
++    "contents": {
++        "force-theme":{
++            "value": "",
++            "serial": 0,
++            "flags": ["global"],
++            "name": "theme",
++            "name[zh_CN]": "主题名称",
++            "description": "设置主题",
++            "permissions": "readwrite",
++            "visibility": "private"
++        }
++    }
++}
+Index: deepin-plymouth/scripts/meson.build
+===================================================================
+--- deepin-plymouth.orig/scripts/meson.build
++++ deepin-plymouth/scripts/meson.build
+@@ -51,3 +51,8 @@ install_data(
+   'bootlog',
+   install_dir: get_option('sysconfdir') / 'logrotate.d',
+ )
++
++install_data(
++  '../dconfig/org.plymouth.theme.json',
++  install_dir: get_option('datadir') / 'dsg/configs/org.plymouth.theme',
++)
+Index: deepin-plymouth/scripts/plymouth-set-default-theme.in
+===================================================================
+--- deepin-plymouth.orig/scripts/plymouth-set-default-theme.in
++++ deepin-plymouth/scripts/plymouth-set-default-theme.in
+@@ -6,6 +6,8 @@ set -e
+ [ -z "$PLYMOUTH_DATADIR" ] && PLYMOUTH_DATADIR="@PLYMOUTH_DATADIR@"
+ [ -z "$PLYMOUTH_CONFDIR" ] && PLYMOUTH_CONFDIR="@PLYMOUTH_CONF_DIR@"
+ [ -z "$PLYMOUTH_POLICYDIR" ] && PLYMOUTH_POLICYDIR="@PLYMOUTH_POLICY_DIR@"
++[ -z "$DDE_DCONFIG" ] && DDE_DCONFIG="/usr/bin/dde-dconfig"
++[ -z "$DCONFIG_THEME_META" ] && DCONFIG_THEME_META="/usr/share/dsg/configs/org.plymouth.theme/org.plymouth.theme.json"
+ if [ -z "$PLYMOUTH_PLUGIN_PATH" ]; then
+     if [ -z "$LIB" ]; then
+         PLYMOUTH_PLUGIN_PATH="$(plymouth --get-splash-plugin-path)"
+@@ -56,9 +58,21 @@ function read_theme_name_from_file ()
+                ')
+ }
+ 
++function get_dconfig_theme ()
++{
++    if [[ -f ${DDE_DCONFIG} ]] && [[ -f ${DCONFIG_THEME_META} ]]; then
++        DCONFIG_THEME=$(dde-dconfig --get -a org.plymouth.theme -r org.plymouth.theme -k force-theme | tr -d '"')
++    fi
++}
++
+ function get_default_theme ()
+ {
+-        THEME_NAME=$(read_theme_name_from_file ${PLYMOUTH_CONFDIR}/plymouthd.conf)
++        get_dconfig_theme
++        if [ ! -z ${DCONFIG_THEME} ]; then
++                THEME_NAME=${DCONFIG_THEME}
++        else
++                THEME_NAME=$(read_theme_name_from_file ${PLYMOUTH_CONFDIR}/plymouthd.conf)
++        fi
+         if [ -z "$THEME_NAME" -o ! -r "${PLYMOUTH_DATADIR}/plymouth/themes/$THEME_NAME/$THEME_NAME.plymouth" ]; then
+                 THEME_NAME=$(read_theme_name_from_file ${PLYMOUTH_POLICYDIR}/plymouthd.defaults)
+         fi
+@@ -79,6 +93,7 @@ DO_INITRD_REBUILD=0
+ DO_LIST=0
+ DO_HELP=0
+ THEME_NAME=""
++DCONFIG_THEME=""
+ while [ $# -gt 0 ]; do
+         case "$1" in
+ 
